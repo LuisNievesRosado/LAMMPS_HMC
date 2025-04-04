@@ -1,0 +1,726 @@
+#============================================================================#
+### HMC NPT Code for mixed atomic and rigid body systems. 
+### Luis Nieves Rosado 10/10/2024
+#============================================================================#
+### Inspired by doi:10.1142/S0219633618400023 but wanted pure LAMMPS 
+### implementation.
+#============================================================================#
+### Notes ###
+#============================================================================#
+# For NVT set PHMC equal to 1.0. No volume moves will be attempted
+#
+# This code currently outputs data to a log file every MCOUTL and trajectory 
+# file every MCOUTD MC sweeps. The format of this logfile is awkward, but 
+# there was no easy way to avoid multiple thermo outputs per MC sweep (caused
+# by several necessary run 0 commands) otherwise. It is HIGHLY recommended 
+# that this is run using the -screen none command line option to also avoid 
+# writing to screen several times per MC sweep.
+#
+# If you need to re-run the code (because it failed for example) make sure to
+# delete HMC.out and PNP.lammpstrj (or however you called your output files) 
+# since these are currently set to append to existing files.
+#============================================================================#
+
+
+#============================================================================#
+### LAMMPS Settings ###
+#============================================================================#
+log none # Avoid writing logfile to not output data every MC sweep
+		 
+units 			lj     
+atom_style		full 
+boundary p p p 
+timestep 0.01        # Dynamically varied for acceptance rate during run
+neigh_modify delay 1
+
+#============================================================================#
+### HMC Variable definitions ###
+#============================================================================#
+
+variable nMC equal 100000   # Number of MC sweeps
+variable nMD equal 100 	    # Number of MD steps in each MD trial move
+variable DlnV equal 0.01    # Maximum allowed volume move in log space
+variable PHMC equal 0.8     # Probability of taking a MD move vs volume move
+
+variable seedvelC equal round(random(1,100000,1346))    # Seed to set Core temperature
+variable seedvelP equal round(random(1,100000,12334))   # Seed to set Poly temperature
+variable typeseed equal round(random(1,100000,129894))  # Seed to choose MD or vol move
+variable Eseed equal round(random(1,100000,45563))      # Seed for MD move acceptance
+variable volseed1 equal round(random(1,100000,123234))  # Seed for volume moves
+variable volseed2 equal round(random(1,100000,97848))   # Seed for volume move acceptance
+
+variable MCcount equal 1          # Counts MC sweeps
+variable MCOUTCL equal 1          # Counts MC sweeps, resets for output
+variable MCOUTCD equal 1          # Counts MC sweeps, resets for output
+variable MCAcountMD equal 1       # Counts MC sweeps, resets for acceptance criterion check
+variable MCAcountVol equal 1      # Counts MC sweeps, resets for acceptance criterion check
+
+variable MCOUTL equal 10         # Output outfile every MCOUTL sweeps
+variable MCOUTD equal 1000       # Output dumpfile every MCOUTD sweeps
+
+#============================================================================#
+### Statistics variable definition ###
+#============================================================================#
+
+# Goal acceptance rates
+variable MDaccG equal 0.6
+variable VolaccG equal 0.3
+
+# For counting
+variable NMDtried equal 0.0  
+variable NMDaccep equal 0.0  
+variable NVoltried equal 0.0 
+variable NVolaccep equal 0.0 
+
+# When to modify acceptances
+variable MDcheckN equal 1000
+variable VolcheckN equal 10000
+
+#============================================================================#
+### Simulation Variable definitions ###
+#============================================================================#
+
+variable T equal 1.5
+variable P equal 1.0
+
+#============================================================================#
+### Interaction Variable definitions ###
+#============================================================================#
+
+variable E34 equal 10.0
+variable E56 equal 10.0
+variable Erep equal 1.0 
+
+variable KB1 equal 165 # 165 is value on Ting et al  
+variable KB2 equal 165 # 165 is value on Ting et al  
+variable KB3 equal 165 # 165 is value on Ting et al  
+variable KB4 equal 165 # 165 is value on Ting et al  
+
+variable KA1 equal 5  # 5 is value on Ting et al
+variable KA2 equal 5  # 5 is value on Ting et al
+variable KA3 equal 60  # 60 is value on Knorowski et al
+
+#============================================================================#
+### Set-up Bias Variables ###
+#============================================================================#
+
+variable kappa equal 10.0
+variable goal equal 1.3431176
+
+
+#============================================================================#
+### Read data files ###
+#============================================================================#
+read_data LargeHMC.data
+
+#============================================================================#
+### Interaction information ###
+#============================================================================#
+pair_style lj/cut 0.673
+
+# 1-1 Family
+pair_coeff 1 1 ${Erep} 1.0 1.122
+pair_coeff 1 2 ${Erep} 1.0 1.122
+pair_coeff 1 8 ${Erep} 1.0 1.122
+pair_coeff 2 2 ${Erep} 1.0 1.122
+pair_coeff 2 8 ${Erep} 1.0 1.122
+pair_coeff 8 8 ${Erep} 1.0 1.122
+
+# Center Family - will be ignored later
+pair_coeff 9 * ${Erep} 1.0 1.122
+pair_coeff 10 * ${Erep} 1.0 1.122
+
+
+# 1-3 Family
+pair_coeff 1 3 ${Erep} 0.8 0.898
+pair_coeff 1 4 ${Erep} 0.8 0.898
+pair_coeff 1 5 ${Erep} 0.8 0.898
+pair_coeff 1 6 ${Erep} 0.8 0.898
+pair_coeff 1 7 ${Erep} 0.8 0.898
+
+pair_coeff 2 3 ${Erep} 0.8 0.898
+pair_coeff 2 4 ${Erep} 0.8 0.898
+pair_coeff 2 5 ${Erep} 0.8 0.898
+pair_coeff 2 6 ${Erep} 0.8 0.898
+pair_coeff 2 7 ${Erep} 0.8 0.898
+
+pair_coeff 3 8 ${Erep} 0.8 0.898
+pair_coeff 4 8 ${Erep} 0.8 0.898
+pair_coeff 5 8 ${Erep} 0.8 0.898
+pair_coeff 6 8 ${Erep} 0.8 0.898
+pair_coeff 7 8 ${Erep} 0.8 0.898
+
+# 3-4
+pair_coeff 3 4 ${E34} 0.6 3.0
+
+# 5-6
+pair_coeff 5 6 ${E56} 0.6 3.0
+
+# 3-3 Family
+pair_coeff 3 3 ${Erep} 0.6 0.673
+pair_coeff 4 4 ${Erep} 0.6 0.673
+pair_coeff 5 5 ${Erep} 0.6 0.673
+pair_coeff 6 6 ${Erep} 0.6 0.673
+pair_coeff 7 7 ${Erep} 0.6 0.673
+
+pair_coeff 3 5 ${Erep} 0.6 0.673
+pair_coeff 3 6 ${Erep} 0.6 0.673
+pair_coeff 3 7 ${Erep} 0.6 0.673
+
+pair_coeff 4 5 ${Erep} 0.6 0.673
+pair_coeff 4 6 ${Erep} 0.6 0.673
+pair_coeff 4 7 ${Erep} 0.6 0.673
+
+pair_coeff 5 7 ${Erep} 0.6 0.673
+pair_coeff 6 7 ${Erep} 0.6 0.673
+
+pair_modify shift yes
+
+bond_style harmonic
+bond_coeff 1 ${KB1} 0.84
+bond_coeff 2 ${KB2} 0.84
+bond_coeff 3 ${KB3} 0.84
+bond_coeff 4 ${KB4} 1.19
+
+angle_style harmonic
+angle_coeff 1 ${KA1} 180
+angle_coeff 2 ${KA2} 180
+angle_coeff 3 ${KA3} 180
+
+#============================================================================#
+### Set-up groups ###
+#============================================================================#
+## 164184 numbers
+#group PolyC molecule 1
+#group PolyI molecule 2
+#group Poly molecule 1 2
+# 
+#group CoreC molecule <> 3 99 # <> is inclusive
+#group CoreI molecule > 99
+#group Cores molecule > 2
+
+# 164279 numbers
+group PolyC molecule 1
+group PolyI molecule 2
+group Poly molecule 1 2
+
+group CoreC molecule <> 3 107 # <> is inclusive
+group CoreI molecule > 107
+group Cores molecule > 2
+
+# For testing - two particles
+#group Core1 molecule 1
+#group Core2 molecule 2
+#group Cores molecule 1 2
+#group Poly molecule 3 4 5 6
+
+# Count up number of degrees of freedom, number of free atoms + number of rigid
+# bodies
+
+group Corecent type 9 10
+
+variable freenum equal count(Poly)+count(Corecent)
+variable FN equal ${freenum} # Done this way to save it statically
+
+
+
+#============================================================================#
+### Remove extraneous interactions ###
+#============================================================================#
+neigh_modify exclude molecule/intra Cores
+
+neigh_modify exclude type 1 9 
+neigh_modify exclude type 2 9
+neigh_modify exclude type 3 9
+neigh_modify exclude type 4 9
+neigh_modify exclude type 5 9
+neigh_modify exclude type 6 9
+neigh_modify exclude type 7 9
+neigh_modify exclude type 8 9
+neigh_modify exclude type 9 9
+
+neigh_modify exclude type 1 10
+neigh_modify exclude type 2 10
+neigh_modify exclude type 3 10
+neigh_modify exclude type 4 10
+neigh_modify exclude type 5 10
+neigh_modify exclude type 6 10
+neigh_modify exclude type 7 10
+neigh_modify exclude type 8 10
+neigh_modify exclude type 9 10
+neigh_modify exclude type 10 10 
+
+#============================================================================#
+### Set-up chunks for COM ###
+#============================================================================#
+
+# Define chunks that match each rigid body
+compute CC Cores chunk/atom molecule
+
+# Compute COM of each rigid body. Sadly doing double work, since fix rigid 
+# already does this. However, no easy way of taking that data and matching it 
+# to individual atoms, which we need to do for volume moves
+compute CoreCOM all com/chunk CC
+
+# Compute to give each atom in a rigid body information about where the COM
+# of that rigid body is. Used for volume moves.
+compute atCoreCOM all chunk/spread/atom CC c_CoreCOM[*]
+
+
+#============================================================================#
+### Set-up simulation thermodynamic output ###
+#============================================================================#
+# Computes to measure temperature 
+compute T all temp
+
+# Track total system energy (used in acceptance checks)
+variable et equal etotal
+
+# Track potential system energy (used in biasing)
+variable potE equal pe
+
+# Track system volume
+variable v equal vol
+
+# This thermo output is not actually used for output. Need to define it for 
+# LAMMPS to evaluate relevant quantities
+thermo 0
+thermo_style custom step vol pe ke etotal c_T press v_NMDtried v_NMDaccep v_NVoltried v_NVolaccep
+
+#============================================================================#
+### Quick run to relax polymers and remove overlaps	###
+#============================================================================#
+
+# Define velocities
+velocity Poly create ${T} ${seedvelP} mom yes rot yes dist gaussian
+velocity Cores create ${T} ${seedvelC} mom yes rot yes dist gaussian
+run 0 post no               
+velocity all scale ${T}   
+
+fix fPRelax Poly nve/limit 0.01
+run 100
+unfix fPRelax
+
+#============================================================================#
+### Fixes for integration	###
+#============================================================================#
+
+# Integrators need to be nve for sampling consistency
+# reinit must be set to yes for rigid bodies so velocities are reset every
+# run.
+
+fix fnveC Cores rigid/nve molecule reinit yes 
+fix fnveP Poly nve                
+
+#============================================================================#
+#============================================================================#
+### Perform HMC ###
+#============================================================================#
+#============================================================================#
+
+#============================================================================#
+### Initialize velocities ###
+#============================================================================#
+label LNewVel				# Label for jumping here
+
+# Create new velocities. Note rigid bodies require the run 0 and rescaling
+# to properly set velocities. See discussion in lammps fix rigid.
+
+velocity Poly create ${T} ${seedvelP} mom yes rot yes dist gaussian
+velocity Cores create ${T} ${seedvelC} mom yes rot yes dist gaussian
+run 0 post no               
+velocity all scale ${T}   
+
+#============================================================================#
+## Store initial conditions ##
+#============================================================================#
+# Store initial atom positions
+fix stx all store/state 0 x
+fix sty all store/state 0 y
+fix stz all store/state 0 z
+
+variable xold atom f_stx
+variable yold atom f_sty
+variable zold atom f_stz
+
+# Store initial atom velocities
+fix stvx all store/state 0 vx
+fix stvy all store/state 0 vy
+fix stvz all store/state 0 vz
+
+variable vxold atom f_stvx
+variable vyold atom f_stvy
+variable vzold atom f_stvz
+
+# Store initial rigid body COM locations
+fix fCOMx all store/state 0 c_atCoreCOM[1]  
+fix fCOMy all store/state 0 c_atCoreCOM[2]
+fix fCOMz all store/state 0 c_atCoreCOM[3]
+
+variable oldCOMx atom f_fCOMx
+variable oldCOMy atom f_fCOMy
+variable oldCOMz atom f_fCOMz  
+
+variable vold equal $v    # Done this way to save it statically
+
+variable eold equal ${et} # Done this way to save it statically
+
+variable peold equal ${potE} # Done this way to save it statically
+
+variable vLx equal xlo
+variable vHx equal xhi
+
+variable vLy equal ylo
+variable vHy equal yhi
+
+variable vLz equal zlo
+variable vHz equal zhi
+
+run 0 post no # Used so store/state fixes are evaluated
+
+#============================================================================#
+## Decide on MD or volume move ##
+#============================================================================#
+
+variable typeR equal random(0,1,${typeseed})
+variable RealR equal ${typeR}  # Done this way to save it statically
+
+if "${RealR} > ${PHMC}" then "jump SELF LVolmove" # Jump to MD step
+if "${RealR} < ${PHMC}" then "jump SELF LMDmove"  # Jump to Vol step
+
+#============================================================================#
+### Perform MD move ###
+#============================================================================#
+
+label LMDmove                            # Label to jump here
+
+variable NMDtried equal ${NMDtried}+1.0  # Statistics tracking
+
+run ${nMD}                               # Run MD steps
+
+jump SELF LMDcheck						 # Jump to checking MD acceptance
+
+#============================================================================#
+### Perform volume move ###
+#============================================================================#
+label LVolmove								# Label to jump here
+
+variable NVoltried equal ${NVoltried}+1.0  # Statistics tracking
+
+variable newlnV equal ln(v_vold)+(random(0,1,${volseed1})-0.5)*${DlnV}  # Move in lnV space
+variable newV equal exp(${newlnV}) 
+
+#============================================================================#
+# Volume move is in x dimension
+#============================================================================#
+#variable Vscale equal v_newV/v_vold  # For changing only 1 dimension
+#
+#variable Lxold equal ${vLx}
+#variable Hxold equal ${vHx}
+#
+## Variable for adjusting relative location between rigid body atom and rigid
+## body COM. Need to account for PBC. 
+#variable COMxadj atom v_xold-v_oldCOMx-(${Hxold}-${Lxold})*round((v_xold-v_oldCOMx)/(${Hxold}-${Lxold}))
+#
+## Scale box, do not move atoms yet
+#change_box all x scale ${Vscale}     
+#
+#variable Lxnew equal ${vLx}
+#variable Hxnew equal ${vHx}
+#
+## Move atoms to new locations, note point particles and rigid bodies need to be treated separately
+#variable newPx atom ${Lxnew}+(v_xold-${Lxold})/(${Hxold}-${Lxold})*(${Hxnew}-${Lxnew})
+#variable newCx atom ${Lxnew}+(v_oldCOMx-${Lxold})/(${Hxold}-${Lxold})*(${Hxnew}-${Lxnew})+v_COMxadj
+#set group Poly x v_newPx
+#set group Cores x v_newCx
+
+#============================================================================#
+# Volume move is in y dimension
+#============================================================================#
+#variable Vscale equal v_newV/v_vold  # For changing only 1 dimension
+#
+#variable Lyold equal ${vLy}
+#variable Hyold equal ${vHy}
+#
+## Variable for adjusting relative location between rigid body atom and rigid
+## body COM. Need to account for PBC.
+#variable COMyadj atom v_yold-v_oldCOMy-(${Hyold}-${Lyold})*round((v_yold-v_oldCOMy)/(${Hyold}-${Lyold}))
+#
+## Scale box, do not move atoms yet
+#change_box all y scale ${Vscale}     
+#
+#variable Lynew equal ${vLy}
+#variable Hynew equal ${vHy}
+#
+## Move atoms to new locations, note point particles and rigid bodies need to be treated separately
+#variable newPy atom ${Lynew}+(v_yold-${Lyold})/(${Hyold}-${Lyold})*(${Hynew}-${Lynew})
+#variable newCy atom ${Lynew}+(v_oldCOMy-${Lyold})/(${Hyold}-${Lyold})*(${Hynew}-${Lynew})+v_COMyadj
+#
+#set group Poly y v_newPy
+#set group Cores y v_newCy
+
+#============================================================================#
+# Volume move is in z dimension
+#============================================================================#
+variable Vscale equal v_newV/v_vold  # For changing only 1 dimension
+
+variable Lzold equal ${vLz}
+variable Hzold equal ${vHz}
+
+# Variable for adjusting relative location between rigid body atom and rigid
+# body COM. Need to account for PBC. Note, needs to happen before scaling
+variable COMzadj atom v_zold-v_oldCOMz-(${Hzold}-${Lzold})*round((v_zold-v_oldCOMz)/(${Hzold}-${Lzold}))
+
+# Scale box, do not move atoms yet
+change_box all z scale ${Vscale} 
+
+variable Lznew equal ${vLz}
+variable Hznew equal ${vHz}
+
+# Move atoms to new locations, note point particles and rigid bodies need to be treated separately
+variable newPz atom ${Lznew}+(v_zold-${Lzold})/(${Hzold}-${Lzold})*(${Hznew}-${Lznew})
+variable newCz atom ${Lznew}+(v_oldCOMz-${Lzold})/(${Hzold}-${Lzold})*(${Hznew}-${Lznew})+v_COMzadj
+
+set group Poly z v_newPz
+set group Cores z v_newCz
+
+#============================================================================#
+# Volume move is in all three dimensions
+#============================================================================#
+#variable Vscaleg equal (v_newV/v_vold)^(0.333)  # Note different scaling
+#
+#variable Lxold equal ${vLx}
+#variable Hxold equal ${vHx}
+#
+#variable Lyold equal ${vLy}
+#variable Hyold equal ${vHy}
+#
+#variable Lzold equal ${vLz}
+#variable Hzold equal ${vHz}
+#
+## Variable for adjusting relative location between rigid body atom and rigid
+## body COM. Need to account for PBC. Note, needs to happen before scaling
+#variable COMxadj atom v_xold-v_oldCOMx-(${Hxold}-${Lxold})*round((v_xold-v_oldCOMx)/(${Hxold}-${Lxold}))
+#variable COMyadj atom v_yold-v_oldCOMy-(${Hyold}-${Lyold})*round((v_yold-v_oldCOMy)/(${Hyold}-${Lyold}))
+#variable COMzadj atom v_zold-v_oldCOMz-(${Hzold}-${Lzold})*round((v_zold-v_oldCOMz)/(${Hzold}-${Lzold}))
+#
+## Scale box, do not move atoms yet
+#change_box all x scale ${Vscaleg} y scale ${Vscaleg} z scale ${Vscaleg}  
+#
+#variable Lxnew equal ${vLx}
+#variable Hxnew equal ${vHx}
+#
+#variable Lynew equal ${vLy}
+#variable Hynew equal ${vHy}
+#
+#variable Lznew equal ${vLz}
+#variable Hznew equal ${vHz}
+#
+## Move atoms to new locations, note point particles and rigid bodies need to be treated separately
+#variable newPx atom ${Lxnew}+(v_xold-${Lxold})/(${Hxold}-${Lxold})*(${Hxnew}-${Lxnew})
+#variable newCx atom ${Lxnew}+(v_oldCOMx-${Lxold})/(${Hxold}-${Lxold})*(${Hxnew}-${Lxnew})+v_COMxadj
+#
+#variable newPy atom ${Lynew}+(v_yold-${Lyold})/(${Hyold}-${Lyold})*(${Hynew}-${Lynew})
+#variable newCy atom ${Lynew}+(v_oldCOMy-${Lyold})/(${Hyold}-${Lyold})*(${Hynew}-${Lynew})+v_COMyadj
+#
+#variable newPz atom ${Lznew}+(v_zold-${Lzold})/(${Hzold}-${Lzold})*(${Hznew}-${Lznew})
+#variable newCz atom ${Lznew}+(v_oldCOMz-${Lzold})/(${Hzold}-${Lzold})*(${Hznew}-${Lznew})+v_COMzadj
+#
+#set group Poly x v_newPx
+#set group Cores x v_newCx
+#
+#set group Poly y v_newPy
+#set group Cores y v_newCy
+#
+#set group Poly z v_newPz
+#set group Cores z v_newCz
+
+jump SELF LVolcheck                # Jump to volume move acceptance
+#============================================================================#
+### Check MC condition - MD move ###
+#============================================================================#
+label LMDcheck                    # Label to jump here
+
+variable eMDnew equal ${et}       # New energy after move
+variable peMDnew equal ${potE}    # New potential energy after move
+
+
+# Bias on system
+variable bias equal 0.5*v_kappa*((v_peMDnew-v_goal)^2-(v_peold-v_goal)^2)
+
+
+# Acceptance criterion for MD move. Assumes LJ units Kb = 1. Otherwise need 
+# to scale c_T
+variable argE equal exp(-(v_eMDnew-v_eold+v_bias)/c_T) 
+
+
+# Check if move is accepted
+if "${argE} > 1.0" then "variable argCE equal 1.0"
+if "${argE} < 1.0" then "variable argCE equal ${argE}"
+
+variable ER equal random(0,1,${Eseed})
+variable RealER equal ${ER} # Done this way to save it statically
+
+# Move is rejected, reset 
+if "${RealER} > ${argCE}" then "jump SELF LresetMD"    
+
+# Move is accepted, track statistics 
+if "${RealER} < ${argCE}" then "variable NMDaccep equal ${NMDaccep}+1.0" 
+
+# Move is accepted, go to next move
+if "${RealER} < ${argCE}" then "jump SELF LNewMove"    
+
+#============================================================================#
+### Check MC condition - vol move ###
+#============================================================================#
+
+label LVolcheck 					# Label to jump here
+
+variable eVnew equal ${et}		    # New energy after move
+variable peVnew equal ${potE}       # New potential energy after move
+
+
+# Bias on system
+variable bias equal 0.5*v_kappa*((v_peVnew-v_goal)^2-(v_peold-v_goal)^2)
+
+# Acceptance criterion for ln V moves. Assumes LJ units Kb. If using real units
+# need to scale c_T
+variable argV equal (1/c_T)*(v_eVnew-v_eold+${P}*(v_newV-v_vold))-(${FN}+1)*ln(v_newV/v_vold)+v_bias
+
+# Quick transformation for numerical stability, avoids taking large exp
+if "${argV} < 0.0" then "variable eargV equal 1.1"   
+if "${argV} > 0.0" then "variable eargV equal exp(-${argV})"
+
+# Check if move is accepted
+if "${eargV} > 1.0" then "variable argCV equal 1.0"
+if "${eargV} < 1.0" then "variable argCV equal ${eargV}"
+
+variable volR equal random(0,1,${volseed2})
+variable RealvolR equal ${volR}
+
+# Move is rejected, reset 
+if "${RealvolR} > ${eargV}" then "jump SELF LresetVol"  
+
+# Move is accepted, track statistics 
+if "${RealvolR} < ${eargV}" then "variable NVolaccep equal ${NVolaccep}+1.0" 
+
+# Move is accepted, go to next move
+if "${RealvolR} < ${eargV}" then "jump SELF LNewMove"	  
+
+#============================================================================#
+### Reset system on rejected MD move ###
+#============================================================================#
+label LresetMD   				# Label to jump here
+
+# Simply set coordinates and velocities to stored ones
+set atom * x v_xold
+set atom * y v_yold
+set atom * z v_zold
+
+set atom * vx v_vxold
+set atom * vy v_vyold
+set atom * vz v_vzold
+
+jump SELF LNewMove			    # Jump to next move
+
+#============================================================================#
+### Reset system on rejected Vol move ###
+#============================================================================#
+label LresetVol					# Label to jump here
+
+# Use if movement was only in one dimension.
+variable revVscale equal ${Vscale}^(-1.0)
+
+#change_box all x scale ${revVscale} # for changing only x dimension, no remapping
+#change_box all y scale ${revVscale} # for changing only y dimension, no remapping
+change_box all z scale ${revVscale} # for changing only z dimension, no remapping
+
+
+# Use if movement was only in three dimensions.
+#variable revVscaleg equal ${Vscaleg}^(-1.0)
+
+# For changing all dimensions, no remapping
+#change_box all x scale ${revVscaleg} y scale ${revVscaleg} z scale ${revVscaleg} 
+
+# Reset locations of all atoms.
+set atom * x v_xold 
+set atom * y v_yold
+set atom * z v_zold
+
+jump SELF LNewMove  # Jump to next move
+
+#============================================================================#
+### Go to new move ###
+#============================================================================#
+label LNewMove   # Label to jump here
+
+unfix stx  # Technically not needed, but clean to do
+unfix sty 
+unfix stz 
+
+unfix stvx
+unfix stvy
+unfix stvz
+
+unfix fCOMx 
+unfix fCOMy
+unfix fCOMz
+
+# Modify timestep to match acceptance criteria
+if "${MCAcountMD}==${MDcheckN}" then &
+	"variable MDP equal ${NMDaccep}/${NMDtried}" &
+	"if '${MDP} > ${MDaccG}' then &
+		'variable newdt equal 1.05*dt' &
+		'timestep ${newdt}'" &
+	"if '${MDP} < ${MDaccG}' then &
+		'variable newdt equal 0.95*dt' &
+		'timestep ${newdt}'" &
+	"variable MCACountMD equal 0" &
+	"variable NMDaccep equal 0" &
+	"variable NMDtried equal 0"
+
+# Modify max volume move to match acceptance criteria
+if "${MCAcountVol}==${VolcheckN}" then &
+	"variable VolP equal ${NVolaccep}/${NVoltried}" &
+	"if '${VolP} > ${VolaccG}' then 'variable DlnV equal 1.05*${DlnV}'" &
+	"if '${VolP} < ${VolaccG}' then 'variable DlnV equal 0.95*${DlnV}'" &
+	"variable MCACountVol equal 0" &
+	"variable NVolaccep equal 0" &
+	"variable NVoltried equal 0"
+
+# This will output a trajectory file every MCOUTD sweeps and an output file every MCOUTL
+# sweeps.
+
+if "${MCOUTCD}==${MCOUTD}" then &
+	"dump 1 all atom 1 PNP.lammpstrj" &
+	"dump_modify 1 append yes" &
+	"run 0 post no" &
+	"undump 1" &
+	"variable MCOUTCD equal 0"
+
+if "${MCOUTCL}==${MCOUTL}" then & 
+	"fix fOUT all ave/time 1 1 1 v_v v_potE v_et c_T c_thermo_press v_NMDtried v_NMDaccep v_NVoltried v_NVolaccep append HMC.out" &
+	"run 0 post no" &
+	"unfix fOUT" &
+	"variable MCOUTCL equal 0"
+
+# Update counts of MC sweeps
+variable MCOUTCD equal ${MCOUTCD}+1
+variable MCOUTCL equal ${MCOUTCL}+1
+variable MCcount equal ${MCcount}+1
+variable MCAcountMD equal ${MCAcountMD}+1
+variable MCAcountVol equal ${MCAcountVol}+1
+
+# If done, end simulation
+if "${MCcount} > ${nMC}" then "jump SELF LEnd"    
+
+# If not, continue, going back to setting velocities
+if "${MCcount} < ${nMC}" then "jump SELF LNewVel" 
+
+#============================================================================#
+### End Simulation ###
+#============================================================================#
+label LEnd 				# Label to jump here
+
+# If needed, output final configuration as a data file
+write_data Final_conf.data nocoeff
